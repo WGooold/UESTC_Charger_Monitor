@@ -1,6 +1,6 @@
 # 充电桩灵动岛监控
 
-一个仿苹果 Dynamic Island 风格的充电桩实时状态监控小工具，悬浮在桌面顶部，随时查看各站点插座状态。
+一个仿苹果 Dynamic Island 风格的充电桩实时状态监控小工具，悬浮在桌面顶部，随时查看各站点插座占用情况。
 
 ---
 
@@ -11,7 +11,10 @@ charger_monitor/
 ├── main.py               # 应用入口
 ├── charger_api.py        # 数据获取层
 ├── charger_ui.py         # UI 组件层
+├── station_picker.py     # 附近站点查询 & 导出工具
 ├── station.json          # 站点配置文件（名称 → ID 映射）
+├── icons.qrc             # Qt 图标资源描述文件
+├── icons_rc.py           # pyrcc5 编译后的图标资源（需自行生成）
 ├── charger_monitor.spec  # PyInstaller 打包配置
 ├── requirements.txt      # Python 依赖
 └── README.md
@@ -21,8 +24,8 @@ charger_monitor/
 
 ## 环境要求
 
-- Python 3.10 或以上（使用了 `X | Y` 联合类型语法）
-- Windows / macOS / Linux
+- Python 3.8 或以上
+- Windows / macOS / Linux（Windows 推荐）
 
 ---
 
@@ -38,13 +41,11 @@ pip install -r requirements.txt
 
 ### 方式一：使用查询工具自动生成（推荐）
 
-运行附带的查询工具：
-
 ```bash
 python station_picker.py
 ```
 
-输入你所在位置的经纬度，查询附近充电站，勾选需要监控的站点，点击**导出 station.json**，将生成的文件放在监控程序同目录下即可。
+程序启动后自动查询附近充电站，勾选需要监控的站点，点击**导出 station.json**，将生成的文件放在监控程序同目录下即可。
 
 ### 方式二：手动编辑
 
@@ -58,10 +59,7 @@ python station_picker.py
 }
 ```
 
-- **键**：任意站点名称，会直接显示在 UI 卡片标题上
-- **值**：API 中的站点数字 ID
-
-> **重要**：`station.json` 不内置在可执行文件中，需放在程序同目录下，程序启动时会自动读取。
+> **重要**：`station.json` 不内置在可执行文件中，需放在程序同目录下，程序启动时自动读取。
 
 ---
 
@@ -70,12 +68,50 @@ python station_picker.py
 打开 `charger_api.py`，找到 `HEADERS` 字典，取消 `token` 行的注释并填入有效值：
 
 ```python
-HEADERS = {
-    ...
-    "token": "你的token值",   # ← 取消注释，填入实际 token
-    ...
+"token": "你的token值",
+```
+
+---
+
+## 配置图标（可选）
+
+图标使用 Qt Resource System，步骤如下：
+
+**1. 准备 PNG 图标**（32×32px，背景透明）：
+
+| 文件名 | 用途 |
+|--------|------|
+| `sort_widget.png` | 排序控件左侧功能图标 |
+| `sort_serial.png` | 按序号排序 |
+| `sort_power.png`  | 按功率排序 |
+| `sort_fee.png`    | 按费用排序 |
+| `sort_duration.png` | 按时长排序 |
+
+**2. 编译资源文件：**
+
+```bash
+pyrcc5 icons.qrc -o icons_rc.py
+```
+
+**3. 在 `charger_ui.py` 顶部取消注释：**
+
+```python
+import icons_rc
+```
+
+**4. 填入资源路径：**
+
+```python
+SORT_WIDGET_ICON_PATH = ":/icons/sort_widget.png"
+SORT_ICON_PATH = {
+    SORT_SERIAL:   ":/icons/sort_serial.png",
+    SORT_POWER:    ":/icons/sort_power.png",
+    SORT_FEE:      ":/icons/sort_fee.png",
+    SORT_DURATION: ":/icons/sort_duration.png",
 }
 ```
+
+不配置图标时，自动回退到文字符号显示，功能不受影响。
 
 ---
 
@@ -85,31 +121,7 @@ HEADERS = {
 python main.py
 ```
 
-启动后，灵动岛胶囊会出现在屏幕顶部居中位置。
-
----
-
-## 使用说明
-
-| 操作 | 效果 |
-|------|------|
-| **左键单击胶囊** | 展开 / 收起站点详情面板 |
-| **胶囊上右键** | 弹出菜单（拖动模式 / 关闭） |
-| **搜索栏输入** | 按站点名称实时过滤 |
-| **拖动模式下按住左键** | 拖动窗口到任意位置 |
-| **拖动模式下右键** | 弹出菜单，可退出拖动模式 |
-
-**插座状态颜色说明：**
-
-| 颜色 | 状态 |
-|------|------|
-| 🟢 绿色 | 空闲（可使用） |
-| 🔴 红色 | 占用中 |
-| 🟡 黄色 | 损坏 |
-
-胶囊指示灯：全局有空闲插座显示**绿色**，全部占用显示**红色**。
-
-数据每 **30 秒**自动后台刷新一次，不阻塞 UI。
+启动后，灵动岛胶囊出现在屏幕顶部居中位置。
 
 ---
 
@@ -121,13 +133,13 @@ python main.py
 pip install pyinstaller
 ```
 
-### 2. 可选：安装 UPX 压缩工具（减小体积约 30-50%）
+### 2. 可选：安装 UPX 压缩（减小体积约 30–50%）
 
 - **Windows**：从 [upx.github.io](https://upx.github.io) 下载，将 `upx.exe` 放入系统 PATH
 - **macOS**：`brew install upx`
-- **Linux**：`sudo apt install upx` 或 `sudo yum install upx`
+- **Linux**：`sudo apt install upx`
 
-若不使用 UPX，打开 `charger_monitor.spec`，将 `upx=True` 改为 `upx=False`。
+不使用 UPX 时，将 `charger_monitor.spec` 中的 `upx=True` 改为 `upx=False`。
 
 ### 3. 执行打包
 
@@ -135,32 +147,23 @@ pip install pyinstaller
 pyinstaller charger_monitor.spec
 ```
 
-打包完成后，可执行文件位于：
-
-```
-dist/充电桩监控          # macOS / Linux
-dist/充电桩监控.exe      # Windows
-```
-
-### 4. 分发
-
-将整个 `dist/` 目录（或其中的单个可执行文件）复制到目标机器即可直接运行，无需安装 Python。
-
-> **注意**：`station.json` 已打包进可执行文件内部，若需修改站点配置，需重新打包。
-> 如果希望保持外部可编辑，可在 spec 文件的 `datas` 中调整路径，并在 `charger_api.py` 中使用 `sys._MEIPASS` 路径读取。
+打包完成后，可执行文件位于 `dist/` 目录。将 `station.json` 放在可执行文件同目录下即可分发。
 
 ---
 
 ## 常见问题
 
-**Q：启动后胶囊是透明的/看不见？**
-A：确认系统开启了窗口合成（Windows 需 Win8+，Linux 需运行合成器如 Picom/Compiz）。
+**Q：胶囊透明 / 看不见？**
+确认系统开启了窗口合成（Windows 需 Win8+，Linux 需运行合成器如 Picom）。
 
-**Q：数据一直显示"正在获取数据…"？**
-A：检查 `station.json` 中的站点 ID 是否正确，以及 `HEADERS` 中的 `token` 是否有效且未过期。
+**Q：一直显示"正在获取数据…"？**
+检查 `station.json` 中的站点 ID 是否正确，以及 `token` 是否有效。
+
+**Q：加载图标路径后程序崩溃（exit code -1073740791）？**
+图标加载必须在 `QApplication` 创建之后执行，当前代码已通过懒加载处理，请确认使用的是最新版 `charger_ui.py`，且 `import icons_rc` 写在文件顶部而非函数内部。
 
 **Q：打包后运行闪退？**
-A：以命令行方式运行 `dist/充电桩监控.exe`，查看报错信息。常见原因是缺少 Qt 平台插件，可将 `PyQt5/Qt5/plugins/platforms/` 目录复制到 `dist/` 同级目录。
+以命令行运行可执行文件查看报错。常见原因是缺少 Qt 平台插件，将 `PyQt5/Qt5/plugins/platforms/` 目录复制到 `dist/` 同级目录即可。
 
 **Q：如何修改刷新间隔？**
-A：打开 `main.py`，修改顶部的 `REFRESH_INTERVAL_MS`（单位毫秒，默认 `30_000` = 30秒）。
+打开 `main.py`，修改 `REFRESH_INTERVAL_MS`（单位毫秒，默认 `30000`）。
