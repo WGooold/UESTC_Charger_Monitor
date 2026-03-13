@@ -6,5 +6,6 @@
     <file>sort_power.png</file>
     <file>sort_fee.png</file>
     <file>sort_duration.png</file>
+    <file>charge.png</file>
   </qresource>
 </RCC>

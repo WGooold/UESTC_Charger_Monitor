@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget, QScrollArea, QFrame, QSizePolicy,
     QMenu, QAction, QLineEdit, QLabel, QApplication, QPushButton
 )
-from PyQt5.QtCore import Qt, QTimer, QRect, QRectF, QPoint
+from PyQt5.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QPropertyAnimation, QEasingCurve, pyqtSignal, pyqtProperty
 from PyQt5.QtGui import (
     QPainter, QColor, QFont, QPainterPath, QFontMetrics,
     QPen, QLinearGradient, QRegion, QPixmap, QIcon
@@ -109,16 +109,78 @@ def sorted_outlets(outlets, mode):
 
 
 # ══════════════════════════════════════════════════════════
-#  插座行（含详情 chips）
+#  插座行（含详情 chips + 左滑"我的插座"功能）
 # ══════════════════════════════════════════════════════════
 class OutletRow(QWidget):
-    H = 40   # 略高一点，容纳 chips
+    H          = 40
+    BTN_W      = 88    # "我的插座"按钮宽度
+    ANIM_MS    = 300   # 动画时长（ms）
+
+    # 信号：用户点击了"我的插座"按钮，传出 outlet 数据
+    my_outlet_clicked = pyqtSignal(dict)
 
     def __init__(self, outlet, parent=None):
         super().__init__(parent)
-        self.o = outlet
+        self.o        = outlet
+        self._slid    = False   # 是否已滑开
+        self._slide_x = 0       # 当前内容区滑动偏移（0=正常, 负=向左滑）
         self.setFixedHeight(self.H)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.PointingHandCursor if outlet.get("status") == 2 else Qt.ArrowCursor)
+
+        # "我的插座"按钮（初始在右侧隐藏区域外）
+        self._btn = QPushButton("⚡ 我的插座", self)
+        self._btn.setFixedSize(self.BTN_W, self.H - 10)
+        self._btn.setCursor(Qt.PointingHandCursor)
+        self._btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(10, 10, 12, 0.92);
+                color: rgb(48, 209, 88);
+                font-size: 12px;
+                font-weight: 800;
+                border: 1.5px solid rgba(48, 209, 88, 0.85);
+                border-radius: 8px;
+                letter-spacing: 1px;
+            }
+            QPushButton:hover {
+                background: rgba(48, 209, 88, 0.18);
+                border: 1.5px solid rgba(48, 209, 88, 1.0);
+                color: rgb(80, 230, 110);
+            }
+            QPushButton:pressed {
+                background: rgba(48, 209, 88, 0.30);
+            }
+        """)
+        self._btn.move(self.width(), 5)   # 初始隐藏在右侧外
+        self._btn.clicked.connect(self._on_my_outlet)
+        self._btn.hide()
+
+        # 滑动动画控制器（用整数属性驱动）
+        self._anim = QPropertyAnimation(self, b"slide_offset")
+        self._anim.setDuration(self.ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # ── Qt property：slide_offset ─────────────────────────
+    def _get_slide_offset(self):
+        return self._slide_x
+
+    def _set_slide_offset(self, val):
+        self._slide_x = val
+        # 同步按钮位置：从右边滑入
+        btn_x = self.width() - self.BTN_W - 4 + (self.BTN_W + 4) + self._slide_x
+        # _slide_x 从 0 到 -(BTN_W+4)，按钮从 width() 移到 width()-BTN_W-4
+        self._btn.move(int(btn_x), 5)
+        self.update()
+
+    slide_offset = pyqtProperty(int, _get_slide_offset, _set_slide_offset)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        # 保持按钮竖向居中，宽度固定
+        if self._slid:
+            self._btn.move(self.width() - self.BTN_W - 4, 5)
+        else:
+            self._btn.move(self.width(), 5)
 
     # ── 格式化辅助 ────────────────────────────────────────
     @staticmethod
@@ -128,6 +190,39 @@ class OutletRow(QWidget):
         h, mn = divmod(m, 60)
         return f"{h}h{mn:02d}m" if mn else f"{h}h"
 
+    # ── 点击逻辑 ─────────────────────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.o.get("status") == 2:
+            if self._slid:
+                self._slide_back()
+            else:
+                self._slide_open()
+
+    def _slide_open(self):
+        self._slid = True
+        self._btn.show()
+        target = -(self.BTN_W + 8)
+        self._anim.stop()
+        self._anim.setStartValue(self._slide_x)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _slide_back(self):
+        self._anim.stop()
+        self._anim.setStartValue(self._slide_x)
+        self._anim.setEndValue(0)
+        self._anim.finished.connect(self._on_slide_back_done)
+        self._anim.start()
+
+    def _on_slide_back_done(self):
+        self._anim.finished.disconnect(self._on_slide_back_done)
+        self._slid = False
+        self._btn.hide()
+
+    def _on_my_outlet(self):
+        self.my_outlet_clicked.emit(self.o)
+
+    # ── 绘制 ─────────────────────────────────────────────
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -135,24 +230,32 @@ class OutletRow(QWidget):
         o     = self.o
         sc    = STATUS_COLOR.get(o["status"], C_GREY)
         busy  = o["status"] == 2
+        ox    = self._slide_x   # 内容水平偏移
 
-        # 行背景
+        # 行背景（固定，不随偏移移动）
         bg = QPainterPath()
         bg.addRoundedRect(QRectF(0, 3, w, h - 6), 8, 8)
         p.fillPath(bg, ac(sc, 20))
 
-        # 左彩条
+        # 裁剪：内容区不超出行边界
+        p.setClipRect(QRect(0, 0, w, h))
+
+        # 左彩条（随偏移）
         bar = QPainterPath()
-        bar.addRoundedRect(QRectF(0, 5, 3, h - 10), 1.5, 1.5)
+        bar.addRoundedRect(QRectF(ox, 5, 3, h - 10), 1.5, 1.5)
         p.fillPath(bar, sc)
 
-        # 插座序号
+        # 插座序号（始终可见，不随偏移）
         p.setPen(C_WHITE)
         p.setFont(QFont("Arial", 11, QFont.Medium))
-        p.drawText(QRect(13, 0, 60, h), Qt.AlignVCenter, f"插座{o['serial']}")
+        p.drawText(QRect(13, 0, 65, h), Qt.AlignVCenter, f"插座{o['serial']}")
+
+        # 淡出系数：ox 从 0 → -(BTN_W+8)，内容随滑动线性淡出
+        slide_target = -(self.BTN_W + 8)
+        fade = max(0.0, min(1.0, 1.0 - ox / slide_target)) if slide_target != 0 else 1.0
 
         if busy and any(o.get(k) is not None for k in ("power_w", "fee", "used_min")):
-            # ── 占用 + 有详情：显示 chips ─────────────────
+            # ── 占用 + 有详情：chips 随偏移滑动并淡出 ────
             chips = []
             if o.get("power_w") is not None:
                 chips.append((f"{o['power_w']}W", C_BLUE))
@@ -164,7 +267,7 @@ class OutletRow(QWidget):
             p.setFont(QFont("Arial", 9, QFont.Bold))
             chip_h = 16
             chip_y = (h - chip_h) // 2
-            cx     = 80   # 从此 x 开始排列 chips
+            cx     = 80 + ox
             gap    = 5
 
             for txt, cc in chips:
@@ -172,24 +275,26 @@ class OutletRow(QWidget):
                 cw  = fm.horizontalAdvance(txt) + 10
                 cp  = QPainterPath()
                 cp.addRoundedRect(QRectF(cx, chip_y, cw, chip_h), chip_h / 2, chip_h / 2)
-                p.fillPath(cp, ac(cc, 30))
-                p.setPen(ac(cc, 220))
-                p.drawText(QRect(cx, chip_y, cw, chip_h), Qt.AlignCenter, txt)
+                p.fillPath(cp, ac(cc, int(30 * fade)))
+                p.setPen(ac(cc, int(220 * fade)))
+                p.drawText(QRect(int(cx), chip_y, cw, chip_h), Qt.AlignCenter, txt)
                 cx += cw + gap
 
-            # 状态标签（右对齐）
-            p.setPen(ac(sc, 200))
+            # 状态标签（随偏移淡出）
+            p.setPen(ac(sc, int(200 * fade)))
             p.setFont(QFont("Arial", 10, QFont.Bold))
-            p.drawText(QRect(0, 0, w - 12, h),
+            p.drawText(QRect(ox, 0, w - 12, h),
                        Qt.AlignVCenter | Qt.AlignRight,
                        STATUS_LABEL.get(o["status"], ""))
         else:
-            # ── 空闲 / 损坏 / 无详情：简洁显示 ──────────
-            p.setPen(ac(sc, 220))
+            # ── 空闲 / 损坏 / 无详情（淡出）─────────────
+            p.setPen(ac(sc, int(220 * fade)))
             p.setFont(QFont("Arial", 11, QFont.Bold))
-            p.drawText(QRect(0, 0, w - 12, h),
+            p.drawText(QRect(ox, 0, w - 12, h),
                        Qt.AlignVCenter | Qt.AlignRight,
                        STATUS_LABEL.get(o["status"], "未知"))
+
+        p.setClipping(False)
 
 
 # ══════════════════════════════════════════════════════════
@@ -199,6 +304,8 @@ class StationCard(QWidget):
     TITLE_H  = 38
     FONT_MAX = 12
     FONT_MIN = 8
+
+    my_outlet_clicked = pyqtSignal(dict)   # 向上冒泡给 DynamicIsland
 
     def __init__(self, name, outlets, card_w,
                  sort_mode: int, parent=None):
@@ -225,6 +332,8 @@ class StationCard(QWidget):
         for o in self.outlets:
             row = OutletRow(o, self)
             row.setGeometry(PAD, y, inner_w, OutletRow.H)
+            # 将"我的插座"信号向上冒泡到 StationCard
+            row.my_outlet_clicked.connect(self.my_outlet_clicked)
             row.show()
             y += OutletRow.H + ROW_GAP
 
@@ -318,6 +427,10 @@ class StationCard(QWidget):
 
 import icons_rc   # ← 编译好 icons_rc.py 后取消此行注释
 
+# 充电监控模式胶囊左侧图标（表示充电中，如闪电图标）
+# 留空则显示文字"⚡"作为回退
+CHARGE_ICON_PATH = ""   # 例：":/icons/charge.png"
+
 # 排序控件左侧的功能图标路径（表示"这是排序控件"）
 SORT_WIDGET_ICON_PATH = ":/icons/sort_widget.png"          # 例：":/icons/sort_widget.png"
 
@@ -352,15 +465,18 @@ _SORT_PIXMAPS        = {}
 _SORT_WIDGET_PIXMAP  = None
 _PIXMAPS_LOADED      = False
 
+_CHARGE_PIXMAP = None
+
 def _ensure_pixmaps_loaded():
     """在 QApplication 存在后调用一次，安全加载所有图标。"""
-    global _SORT_WIDGET_PIXMAP, _PIXMAPS_LOADED
+    global _SORT_WIDGET_PIXMAP, _PIXMAPS_LOADED, _CHARGE_PIXMAP
     if _PIXMAPS_LOADED:
         return
     _PIXMAPS_LOADED = True
     for mode, path in SORT_ICON_PATH.items():
         _SORT_PIXMAPS[mode] = _path_to_pixmap(path, size=28)
     _SORT_WIDGET_PIXMAP = _path_to_pixmap(SORT_WIDGET_ICON_PATH, size=20)
+    _CHARGE_PIXMAP      = _path_to_pixmap(CHARGE_ICON_PATH, size=24)
 
 class SortButton(QWidget):
     """胶囊按钮，点击弹出菜单选择排序方式。"""
@@ -486,16 +602,23 @@ class DynamicIsland(QWidget):
         _ensure_pixmaps_loaded()
 
         # 数据 & UI 状态
-        self._data:      dict  = {}
-        self._filtered:  dict  = {}
-        self._expanded:  bool  = False
-        self._hover:     bool  = False
-        self._phase:     float = 0.0
-        self._sort_mode   = SORT_SERIAL
+        self._data       = {}
+        self._filtered   = {}
+        self._expanded   = False
+        self._hover      = False
+        self._phase      = 0.0
+        self._sort_mode  = SORT_SERIAL
+
+        # ── 充电模式状态 ──────────────────────────────────
+        self._charging       = False    # 是否处于充电监控模式
+        self._charge_outlet  = None     # 正在监控的 outlet dict
+        self._charge_done    = False    # 是否已充电完成
+        self._charge_phase   = 0.0     # 充电动画相位
+        self._charge_anim_on = True     # 动态扫光效果开关
 
         # 拖动
-        self._drag_mode:  bool          = False
-        self._dragging:   bool          = False
+        self._drag_mode  = False
+        self._dragging   = False
         self._drag_start = None  # type: Optional[QPoint]
 
         # 脉冲
@@ -569,7 +692,31 @@ class DynamicIsland(QWidget):
     def update_data(self, data):
         self._data = data
         self._apply_filter()
+        # 充电模式：用新数据更新当前监控插座
+        if self._charging and self._charge_outlet:
+            outlet_no = self._charge_outlet.get("outletNo")
+            for outlets in data.values():
+                for o in outlets:
+                    if o.get("outletNo") == outlet_no:
+                        self._charge_outlet = o
+                        # 插座不再占用 → 充电完成
+                        if o.get("status") != 2 and not self._charge_done:
+                            self._charge_done = True
+                        break
         self.update(0, 0, ISLAND_W, CAPSULE_H)
+
+    def _on_my_outlet_clicked(self, outlet):
+        """用户点击了'我的插座'按钮，进入充电监控模式。"""
+        self._charging      = True
+        self._charge_outlet = dict(outlet)
+        self._charge_done   = False
+        self._charge_phase  = 0.0
+        # 收起面板
+        if self._expanded:
+            self._expanded = False
+            self._search.clear()
+            self._apply_size()
+        self.update()
 
     # ──────────────────────────────────────────────────────
     #  搜索 & 排序
@@ -676,6 +823,7 @@ class DynamicIsland(QWidget):
         for name, outlets in self._filtered.items():
             card = StationCard(name, outlets, card_w, self._sort_mode, container)
             card.setGeometry(PAD, y, card_w, card.height())
+            card.my_outlet_clicked.connect(self._on_my_outlet_clicked)
             y += card.height() + CARD_GAP
 
         container.setFixedSize(ISLAND_W, y)
@@ -691,6 +839,9 @@ class DynamicIsland(QWidget):
 
     def _on_pulse(self):
         self._phase = (self._phase + 0.07) % (2 * math.pi)
+        if self._charging and self._charge_anim_on:
+            # 流光用线性推进，0.0→1.0 循环，每帧 +0.018（约 1.7s 一个周期）
+            self._charge_phase = (self._charge_phase + 0.018) % 1.0
         self.update(0, 0, ISLAND_W, CAPSULE_H)
 
     # ──────────────────────────────────────────────────────
@@ -719,8 +870,14 @@ class DynamicIsland(QWidget):
         gl.setColorAt(1, ac(C_WHITE, 0))
         p.fillPath(path, gl)
 
-        p.setPen(QPen(ac(C_BLUE, 200) if self._drag_mode else ac(C_SEP, 130),
-                      1.5 if self._drag_mode else 0.8))
+        # 充电模式：绿色边框脉冲
+        if self._charging and not self._drag_mode:
+            pulse = (math.sin(self._charge_phase) + 1) / 2
+            border_alpha = int(120 + pulse * 135)
+            p.setPen(QPen(ac(C_GREEN, border_alpha), 1.8))
+        else:
+            p.setPen(QPen(ac(C_BLUE, 200) if self._drag_mode else ac(C_SEP, 130),
+                          1.5 if self._drag_mode else 0.8))
         p.drawPath(path)
         p.setOpacity(1.0)
 
@@ -728,6 +885,18 @@ class DynamicIsland(QWidget):
             p.setPen(ac(C_BLUE, 230))
             p.setFont(QFont("Arial", 11, QFont.Medium))
             p.drawText(QRect(0, 0, w, h), Qt.AlignCenter, "✥  拖动模式  —  右键退出")
+            return
+
+        # ── 充电完成提示 ───────────────────────────────────
+        if self._charging and self._charge_done:
+            p.setPen(C_GREEN)
+            p.setFont(QFont("Arial", 16, QFont.Bold))
+            p.drawText(QRect(0, 0, w, h), Qt.AlignCenter, "充电完成")
+            return
+
+        # ── 充电监控模式胶囊 ───────────────────────────────
+        if self._charging and self._charge_outlet:
+            self._draw_charging_capsule(p, w, h)
             return
 
         any_free, fn, tot = self._calc()
@@ -761,6 +930,97 @@ class DynamicIsland(QWidget):
         p.setFont(QFont("Arial", 8))
         p.drawText(QRect(0, 0, w - 10, h), Qt.AlignVCenter | Qt.AlignRight,
                    "▲" if self._expanded else "▼")
+
+    def _draw_charging_capsule(self, p, w, h):
+        """充电监控模式下的胶囊内容：充电图标 + 方形光斑扫光 + 功率 / 费用 / 时长。"""
+        o = self._charge_outlet
+        t = self._charge_phase   # 0.0 → 1.0 线性推进
+
+        # ══ 方形光斑扫光 ════════════════════════════════════
+        if self._charge_anim_on:
+            spot_w = 100.0
+            span   = w + spot_w
+            x0     = t * span - spot_w
+
+            gl = QLinearGradient(x0, 0, x0 + spot_w, 0)
+            gl.setColorAt(0.00, ac(C_GREEN, 0))
+            gl.setColorAt(0.25, ac(C_GREEN, 50))
+            gl.setColorAt(0.50, ac(C_GREEN, 70))
+            gl.setColorAt(0.75, ac(C_GREEN, 50))
+            gl.setColorAt(1.00, ac(C_GREEN, 0))
+
+            # 用胶囊圆角路径裁剪，防止矩形光斑在两端溢出圆角
+            r = h / 2
+            cap_path = QPainterPath()
+            cap_path.addRoundedRect(QRectF(0, 0, w, h), r, r)
+            p.setClipPath(cap_path)
+            p.setPen(Qt.NoPen)
+            p.setBrush(gl)
+            p.drawRect(QRectF(x0, 0, spot_w, h))
+            p.setClipping(False)
+        # ══ 光斑结束 ════════════════════════════════════════
+
+        # ── 左侧：充电图标（自定义或回退"⚡"文字）────────
+        icon_sz = 22
+        icon_x  = 10
+        icon_y  = (h - icon_sz) // 2
+
+        pm = _CHARGE_PIXMAP
+        if pm and not pm.isNull():
+            p.setOpacity(1.0)
+            p.drawPixmap(icon_x, icon_y, pm)
+        else:
+            p.setPen(ac(C_GREEN, 230))
+            p.setFont(QFont("Arial", 15, QFont.Bold))
+            p.drawText(QRect(icon_x, 0, icon_sz, h),
+                       Qt.AlignVCenter | Qt.AlignHCenter, "⚡")
+
+        # 插座序号
+        serial  = o.get("serial", "?")
+        label_x = icon_x + icon_sz + 4
+        p.setPen(ac(C_GREEN, 190))
+        p.setFont(QFont("Arial", 9))
+        p.drawText(QRect(label_x, 0, 28, h), Qt.AlignVCenter, f"#{serial}")
+
+        # 三个数据项
+        items = []
+        if o.get("power_w") is not None:
+            items.append((f"{o['power_w']}W", C_BLUE))
+        if o.get("fee") is not None:
+            items.append((f"¥{o['fee']:.2f}", C_GREEN))
+        if o.get("used_min") is not None:
+            mins = o["used_min"]
+            if mins < 60:
+                tstr = f"{mins}分"
+            else:
+                hh, mm = divmod(mins, 60)
+                tstr = f"{hh}h{mm:02d}m" if mm else f"{hh}h"
+            items.append((tstr, C_PURPLE))
+
+        if items:
+            p.setFont(QFont("Arial", 11, QFont.Bold))
+            # 均匀分布在右侧区域
+            area_x  = 66
+            area_w  = w - area_x - 12
+            item_w  = area_w // len(items)
+            for i, (txt, cc) in enumerate(items):
+                ix = area_x + i * item_w
+                # 小背景 pill
+                fm   = p.fontMetrics()
+                tw   = fm.horizontalAdvance(txt)
+                pill = QPainterPath()
+                ph, pw = 20, tw + 12
+                px = ix + (item_w - pw) // 2
+                py = (h - ph) // 2
+                pill.addRoundedRect(QRectF(px, py, pw, ph), ph/2, ph/2)
+                p.fillPath(pill, ac(cc, 28))
+                p.setPen(ac(cc, 230))
+                p.drawText(QRect(px, py, pw, ph), Qt.AlignCenter, txt)
+        else:
+            # 没有详情数据时
+            p.setPen(ac(C_GREY, 180))
+            p.setFont(QFont("Arial", 11))
+            p.drawText(QRect(66, 0, w - 78, h), Qt.AlignVCenter, "获取充电数据中…")
 
     def _draw_panel_bg(self, p):
         path = QPainterPath()
@@ -809,6 +1069,11 @@ class DynamicIsland(QWidget):
             a = QAction("  ✥  拖动模式", self)
             a.triggered.connect(self._enter_drag_mode)
         menu.addAction(a)
+        if self._charging:
+            menu.addSeparator()
+            ec = QAction("  ⚡  退出充电模式", self)
+            ec.triggered.connect(self._exit_charging)
+            menu.addAction(ec)
         menu.addSeparator()
         q = QAction("  ✕  关闭", self)
         q.triggered.connect(QApplication.instance().quit)
@@ -835,6 +1100,58 @@ class DynamicIsland(QWidget):
         self.update()
 
     # ──────────────────────────────────────────────────────
+    #  充电模式
+    # ──────────────────────────────────────────────────────
+    def _exit_charging(self):
+        self._charging      = False
+        self._charge_outlet = None
+        self._charge_done   = False
+        self.update()
+
+    def _toggle_charge_anim(self):
+        self._charge_anim_on = not self._charge_anim_on
+        self.update()
+
+    def _show_charging_menu(self, global_pos):
+        menu = QMenu(self)
+        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint |
+                            Qt.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WA_TranslucentBackground)
+        menu.setStyleSheet("""
+            QMenu {
+                background: rgba(30,30,32,245);
+                border: 1px solid rgba(255,255,255,0.13);
+                border-radius: 12px;
+                padding: 5px 0;
+                color: white; font-size: 13px;
+            }
+            QMenu::item {
+                padding: 9px 22px 9px 16px;
+                border-radius: 7px; margin: 1px 5px;
+            }
+            QMenu::item:selected { background: rgba(255,255,255,0.11); }
+            QMenu::separator {
+                height: 1px; background: rgba(255,255,255,0.10);
+                margin: 4px 12px;
+            }
+        """)
+        title = QAction("  退出充电监控模式？", self)
+        title.setEnabled(False)
+        menu.addAction(title)
+        menu.addSeparator()
+        yes = QAction("  ✓  返回普通模式", self)
+        yes.triggered.connect(self._exit_charging)
+        menu.addAction(yes)
+        no = QAction("  ✕  继续监控", self)
+        menu.addAction(no)
+        menu.addSeparator()
+        anim_label = "  ◎  关闭动态效果" if self._charge_anim_on else "  ◎  开启动态效果"
+        anim_act = QAction(anim_label, self)
+        anim_act.triggered.connect(self._toggle_charge_anim)
+        menu.addAction(anim_act)
+        menu.exec_(global_pos)
+
+    # ──────────────────────────────────────────────────────
     #  鼠标事件
     # ──────────────────────────────────────────────────────
     def mousePressEvent(self, e):
@@ -846,6 +1163,9 @@ class DynamicIsland(QWidget):
             if self._drag_mode:
                 self._dragging   = True
                 self._drag_start = e.globalPos() - self.frameGeometry().topLeft()
+            elif in_capsule and self._charging:
+                # 充电模式：弹菜单询问是否返回普通模式
+                self._show_charging_menu(e.globalPos())
             elif in_capsule:
                 self._expanded = not self._expanded
                 if not self._expanded:
